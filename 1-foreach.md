@@ -1,0 +1,145 @@
+---
+title: "foreach"
+author: "Dongdong"
+date: "19 November 2018"
+output: 
+    html_document:
+      keep_md: yes
+      theme: paper
+---
+
+
+
+## R Markdown
+
+
+```r
+suppressMessages({
+    library(data.table)
+    library(magrittr)
+    library(rbenchmark) 
+    
+    library(plyr)
+    library(pryr)
+    
+    library(RcppArray)
+    library(bigmemory)
+    library(doParallel)
+})
+
+split_indice <- function(index, ngrp = 4){
+    n <- length(index)
+    ids <- findInterval((0:(n-1))/n*ngrp, 1:ngrp)
+    ids.lst <- split(index, ids+1)
+    if (length(ids.lst) == ngrp + 1){
+        ids.lst[[ngrp]] <- c(ids.lst[[ngrp]], ids.lst[[ngrp+1]])
+        ids.lst <- ids.lst[1:ngrp]
+    }
+    ids.lst
+}
+
+killCluster <- function() system("taskkill /IM Rscript.exe -f")
+
+cl <- makeCluster(4)
+registerDoParallel(cl)
+# stopImplicitCluster()
+```
+
+
+```r
+nrow <- 1e2
+ncol <- 1e2
+ntime <- 1e4
+
+mat     <- array(rnorm(nrow*ncol*ntime), dim = c(nrow*ncol, ntime))
+ids.lst <- split_indice(1:ncol(mat), 4*4) # split index into group
+
+# arr <- aperm(arr, c(2, 1, 3))
+# mat     <- `dim<-`(arr, c(nrow*ncol, ntime))
+mat_big <- as.big.matrix(mat)
+xdesc   <- describe(mat_big)
+
+n <- 1000
+newval    <- rnorm(1:n) %>% array(dim = c(n, ntime))
+newval_3d <- `dim<-`(newval, dim = c(n/10, 10, ntime))
+
+probs = c(0.9, 0.95, 0.975, 0.99, 0.995, 0.9975, 0.999, 0.9995, 0.99975, 0.9999)
+
+```
+
+
+```r
+# foreach parallel + bigmemory
+q_bigm <- function(){
+    foreach(j = icount(ncol(mat)), .combine = "cbind", .packages = c("bigmemory"), 
+            .export = c("xdesc", "probs")) %dopar% {
+        mat_big <- attach.big.matrix(xdesc)
+        quantile(mat_big[, j], probs)
+    }
+}
+
+# foreach parallel + bigmemory + chunk
+q_bigm_chunk <- function(){
+    foreach(js = ids.lst, .combine = "cbind", .packages = c("bigmemory"), 
+              .export = c("xdesc", "probs")) %dopar% {
+        mat_big <- attach.big.matrix(xdesc)
+        apply(mat_big[, js], 2, quantile, probs)
+    }
+}
+
+# foreach 
+q_r <- function(){
+    foreach(j = icount(ncol(mat)), .combine = "cbind", .packages = c("bigmemory")) %do% {
+        # mat_big <- attach.big.matrix(xdesc)
+        quantile(mat[, j], probs)
+        # j
+    }
+}
+
+# foreach with chunk
+q_r_chunk <- function(){
+    foreach(js = ids.lst, .combine = "cbind", .packages = c("bigmemory")) %do% {
+        # mat_big <- attach.big.matrix(xdesc)
+        apply(mat[, js], 2, quantile, probs)
+        # quantile(mat[, j], probs)
+        # j
+    }
+}
+```
+
+
+```r
+rbenchmark::benchmark(
+    q1 <- apply(mat, 2, quantile, probs),
+    q2 <- aaply(mat, 2, quantile, probs),
+    q_r(),
+    q_r_chunk(),
+    q_bigm_chunk(),
+    q_bigm(),
+    replications = 1
+)
+```
+
+```
+##                                   test replications elapsed relative
+## 6                             q_bigm()            1   37.11   10.030
+## 5                       q_bigm_chunk()            1    3.70    1.000
+## 3                                q_r()            1   13.06    3.530
+## 4                          q_r_chunk()            1   10.07    2.722
+## 1 q1 <- apply(mat, 2, quantile, probs)            1    8.52    2.303
+## 2 q2 <- aaply(mat, 2, quantile, probs)            1    9.13    2.468
+##   user.self sys.self user.child sys.child
+## 6      4.04     0.99         NA        NA
+## 5      0.03     0.00         NA        NA
+## 3     12.38     0.05         NA        NA
+## 4      9.26     0.70         NA        NA
+## 1      8.30     0.20         NA        NA
+## 2      9.05     0.01         NA        NA
+```
+
+
+
+```r
+stopCluster(cl)
+killCluster()
+```
